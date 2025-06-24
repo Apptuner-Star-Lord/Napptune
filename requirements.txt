@@ -1,0 +1,9 @@
+daphne
+channels
+dotenv
+django
+psycopg2-binary
+requests
+httpx
+langchain
+ollama
