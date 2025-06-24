@@ -8,7 +8,10 @@ function App() {
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState(() => generateSessionId());
   const [manualSessionId, setManualSessionId] = useState("");
+  const [voiceMode, setVoiceMode] = useState(false);
   const ws = useRef(null);
+  const audioQueue = useRef([]);
+  const isPlayingAudio = useRef(false);
 
   useEffect(() => {
     document.title = 'Demo for Chat bot';
@@ -30,10 +33,31 @@ function App() {
     }
   }, [open, sessionId]);
 
+  // Helper to play next audio in queue
+  const playNextAudio = () => {
+    if (audioQueue.current.length === 0) {
+      isPlayingAudio.current = false;
+      return;
+    }
+    isPlayingAudio.current = true;
+    const base64 = audioQueue.current.shift();
+    const audioData = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+    const blob = new Blob([audioData], { type: 'audio/mpeg' });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.onended = () => {
+      playNextAudio();
+    };
+    audio.play();
+  };
+
   const handleWidgetClick = () => {
     setOpen(true);
     if (!ws.current) {
-      ws.current = new window.WebSocket('ws://localhost:8000/ws/chat/');
+      const wsUrl = voiceMode
+        ? 'ws://localhost:8000/ws/voice/'
+        : 'ws://localhost:8000/ws/chat/';
+      ws.current = new window.WebSocket(wsUrl);
       ws.current.onopen = () => {
         console.log('WebSocket connected');
       };
@@ -46,38 +70,61 @@ function App() {
       ws.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         setSending(false);
-        if (data.session_id && data.session_id !== sessionId) {
-          setSessionId(data.session_id);
-        }
-        if (data.full_message) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            if (updated.length && updated[updated.length - 1].botStreaming) {
-              updated[updated.length - 1] = { bot: true, text: data.full_message };
-            } else {
-              updated.push({ bot: true, text: data.full_message });
+        if (voiceMode) {
+          // Voice mode: queue audio as it streams in
+          if (data.audio_data) {
+            audioQueue.current.push(data.audio_data);
+            setMessages((prev) => [...prev, { bot: true, text: data.text }]);
+            if (!isPlayingAudio.current) {
+              playNextAudio();
             }
-            return updated;
-          });
-        } else if (data.message) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            if (updated.length && updated[updated.length - 1].botStreaming) {
-              const currentText = updated[updated.length - 1].text;
-              let newText = data.message;
-              if (newText.startsWith(currentText)) {
-                updated[updated.length - 1].text = newText;
+          } else if (data.message) {
+            setMessages((prev) => [...prev, { bot: true, text: data.message }]);
+          }
+        } else {
+          if (data.session_id && data.session_id !== sessionId) {
+            setSessionId(data.session_id);
+          }
+          if (data.full_message) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              if (updated.length && updated[updated.length - 1].botStreaming) {
+                updated[updated.length - 1] = { bot: true, text: data.full_message };
               } else {
-                updated[updated.length - 1].text += newText;
+                updated.push({ bot: true, text: data.full_message });
               }
-            } else {
-              updated.push({ bot: true, text: data.message, botStreaming: true });
-            }
-            return updated;
-          });
+              return updated;
+            });
+          } else if (data.message) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              if (updated.length && updated[updated.length - 1].botStreaming) {
+                const currentText = updated[updated.length - 1].text;
+                let newText = data.message;
+                if (newText.startsWith(currentText)) {
+                  updated[updated.length - 1].text = newText;
+                } else {
+                  updated[updated.length - 1].text += newText;
+                }
+              } else {
+                updated.push({ bot: true, text: data.message, botStreaming: true });
+              }
+              return updated;
+            });
+          }
         }
       };
       console.log('WebSocket connecting...');
+    }
+  };
+
+  const handleVoiceToggle = () => {
+    setVoiceMode(v => !v);
+    if (ws.current) {
+      ws.current.close();
+      ws.current = null;
+      setMessages([]);
+      setSessionId(generateSessionId());
     }
   };
 
@@ -97,8 +144,13 @@ function App() {
     const input = e.target.elements.msg;
     if (input.value && ws.current && ws.current.readyState === 1 && !sending) {
       setSending(true);
-      ws.current.send(JSON.stringify({ message: input.value, session_id: sessionId }));
-      setMessages((prev) => [...prev, { self: true, text: input.value }]);
+      if (voiceMode) {
+        ws.current.send(JSON.stringify({ text: input.value }));
+        setMessages((prev) => [...prev, { self: true, text: input.value }]);
+      } else {
+        ws.current.send(JSON.stringify({ message: input.value, session_id: sessionId }));
+        setMessages((prev) => [...prev, { self: true, text: input.value }]);
+      }
       input.value = '';
       console.log('Message sent to backend:', input.value, 'Session:', sessionId);
     }
@@ -167,6 +219,9 @@ function App() {
         <p style={{ maxWidth: 500, margin: '0 auto', color: '#bbb' }}>
           This is a simple demo page for a floating chat widget. Click the chat icon at the bottom right to start a conversation with the bot. The chat window supports real-time streaming responses.
         </p>
+        <button onClick={handleVoiceToggle} style={{ position: 'fixed', bottom: 90, right: 30, zIndex: 1000 }}>
+          {voiceMode ? 'Switch to Text Chat' : 'Switch to Voice Chat'}
+        </button>
       </div>
       {/* Widget Icon */}
       {!open && (
@@ -182,16 +237,18 @@ function App() {
             <button className="close-btn" onClick={handleClose}>×</button>
           </div>
           {/* Session ID input for fetching history */}
-          <form onSubmit={handleGetHistory} style={{ display: 'flex', gap: 8, margin: '8px 0', alignItems: 'center' }}>
-            <input
-              type="text"
-              placeholder="Enter session ID to fetch history"
-              value={manualSessionId}
-              onChange={handleManualSessionIdChange}
-              style={{ flex: 1 }}
-            />
-            <button type="submit">Get</button>
-          </form>
+          {!voiceMode && (
+            <form onSubmit={handleGetHistory} style={{ display: 'flex', gap: 8, margin: '8px 0', alignItems: 'center' }}>
+              <input
+                type="text"
+                placeholder="Enter session ID to fetch history"
+                value={manualSessionId}
+                onChange={handleManualSessionIdChange}
+                style={{ flex: 1 }}
+              />
+              <button type="submit">Get</button>
+            </form>
+          )}
           <div className="chat-messages">
             {messages.map((msg, i) => (
               msg.self ? (
@@ -202,7 +259,7 @@ function App() {
               ) : (
                 <div key={i} className="chat-message bot">
                   <span className="chat-avatar bot">🤖</span>
-                  <span className="chat-text">{formatBotMessage(msg.text)}</span>
+                  <span className="chat-text">{voiceMode ? msg.text : formatBotMessage(msg.text)}</span>
                 </div>
               )
             ))}
