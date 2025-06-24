@@ -16,7 +16,9 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
+from chat_bot import views as chat_bot_views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/chat/history/<str:session_id>/', chat_bot_views.chat_history, name='chat_history'),
 ]

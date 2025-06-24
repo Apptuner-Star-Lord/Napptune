@@ -1,10 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
 import './App.css';
+import { generateSessionId } from './session';
 
 function App() {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [sending, setSending] = useState(false);
+  const [sessionId, setSessionId] = useState(() => generateSessionId());
+  const [manualSessionId, setManualSessionId] = useState("");
   const ws = useRef(null);
 
   useEffect(() => {
@@ -12,6 +15,20 @@ function App() {
     document.body.style.background = '#111';
     document.body.style.color = '#fff';
   }, []);
+
+  // On open, fetch previous messages for this sessionId
+  useEffect(() => {
+    if (open && sessionId) {
+      fetch(`http://localhost:8000/api/chat/history/${sessionId}/`)
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data.messages)) {
+            setMessages(data.messages.map(m => m.role === 'user' ? { self: true, text: m.content } : { bot: true, text: m.content }));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [open, sessionId]);
 
   const handleWidgetClick = () => {
     setOpen(true);
@@ -28,9 +45,10 @@ function App() {
       };
       ws.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        console.log('Received from backend:', data);
-        // Hide sending... as soon as we get any data from backend
         setSending(false);
+        if (data.session_id && data.session_id !== sessionId) {
+          setSessionId(data.session_id);
+        }
         if (data.full_message) {
           setMessages((prev) => {
             const updated = [...prev];
@@ -47,7 +65,6 @@ function App() {
             if (updated.length && updated[updated.length - 1].botStreaming) {
               const currentText = updated[updated.length - 1].text;
               let newText = data.message;
-              // Only append the new part if it is not already present
               if (newText.startsWith(currentText)) {
                 updated[updated.length - 1].text = newText;
               } else {
@@ -69,7 +86,9 @@ function App() {
     if (ws.current) {
       ws.current.close();
       ws.current = null;
-      console.log('WebSocket connection closed by user.');
+      setSessionId(generateSessionId()); // New session on close
+      setMessages([]);
+      console.log('WebSocket connection closed by user. New session will be created on next open.');
     }
   };
 
@@ -78,10 +97,35 @@ function App() {
     const input = e.target.elements.msg;
     if (input.value && ws.current && ws.current.readyState === 1 && !sending) {
       setSending(true);
-      ws.current.send(JSON.stringify({ message: input.value }));
+      ws.current.send(JSON.stringify({ message: input.value, session_id: sessionId }));
       setMessages((prev) => [...prev, { self: true, text: input.value }]);
       input.value = '';
-      console.log('Message sent to backend:', input.value);
+      console.log('Message sent to backend:', input.value, 'Session:', sessionId);
+    }
+  };
+
+  const handleManualSessionIdChange = (e) => {
+    setManualSessionId(e.target.value);
+  };
+
+  const handleGetHistory = (e) => {
+    e.preventDefault();
+    if (manualSessionId) {
+      fetch(`http://localhost:8000/api/chat/history/${manualSessionId}/`)
+        .then(res => res.json()) 
+        .then(data => {
+          if (Array.isArray(data.messages)) {
+            setSessionId(manualSessionId);
+            setMessages(data.messages.map(m => {
+              const msgObj = m.role === 'user' ? { self: true, text: m.content } : { bot: true, text: m.content };
+              console.log('History message:', msgObj);
+              return msgObj;
+            }));
+          }
+        })
+        .catch(() => {});
+      
+      console.log('Fetching history for session:', manualSessionId)
     }
   };
 
@@ -137,6 +181,17 @@ function App() {
             <span>Chat Bot Demo</span>
             <button className="close-btn" onClick={handleClose}>×</button>
           </div>
+          {/* Session ID input for fetching history */}
+          <form onSubmit={handleGetHistory} style={{ display: 'flex', gap: 8, margin: '8px 0', alignItems: 'center' }}>
+            <input
+              type="text"
+              placeholder="Enter session ID to fetch history"
+              value={manualSessionId}
+              onChange={handleManualSessionIdChange}
+              style={{ flex: 1 }}
+            />
+            <button type="submit">Get</button>
+          </form>
           <div className="chat-messages">
             {messages.map((msg, i) => (
               msg.self ? (
