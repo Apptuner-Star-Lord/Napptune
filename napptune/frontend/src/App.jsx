@@ -9,9 +9,17 @@ function App() {
   const [sessionId, setSessionId] = useState(() => generateSessionId());
   const [manualSessionId, setManualSessionId] = useState("");
   const [voiceMode, setVoiceMode] = useState(false);
+  const [sttActive, setSttActive] = useState(false);
   const ws = useRef(null);
   const audioQueue = useRef([]);
   const isPlayingAudio = useRef(false);
+  const recognitionRef = useRef(null);
+  const sttTimeout = useRef(null);
+  const inputRef = useRef(null);
+
+  // New state for live transcript and listening/processing UI
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     document.title = 'Demo for Chat bot';
@@ -51,6 +59,14 @@ function App() {
     audio.play();
   };
 
+  // Helper to control STT activation from bot response
+  const deactivateSTT = () => {
+    if (sttActive) setSttActive(false);
+  };
+  const activateSTT = () => {
+    if (!sttActive) setSttActive(true);
+  };
+
   const handleWidgetClick = () => {
     setOpen(true);
     if (!ws.current) {
@@ -71,12 +87,42 @@ function App() {
         const data = JSON.parse(event.data);
         setSending(false);
         if (voiceMode) {
-          // Voice mode: queue audio as it streams in
+          // Deactivate STT as soon as we start receiving a response
+          deactivateSTT();
+          // Voice mode: group sentences for the same response
           if (data.audio_data) {
             audioQueue.current.push(data.audio_data);
-            setMessages((prev) => [...prev, { bot: true, text: data.text }]);
+            setMessages((prev) => {
+              // If last message is bot and not is_final, append sentence if not already present
+              if (
+                prev.length &&
+                prev[prev.length - 1].bot &&
+                !prev[prev.length - 1].is_final
+              ) {
+                const updated = [...prev];
+                const lastMsg = updated[updated.length - 1];
+                // Only append if data.text is not already at the end
+                const trimmedLast = lastMsg.text.trim();
+                const trimmedNew = data.text.trim();
+                if (!trimmedLast.endsWith(trimmedNew)) {
+                  lastMsg.text = (trimmedLast + ' ' + trimmedNew).trim();
+                }
+                lastMsg.is_final = data.is_final;
+                return updated;
+              } else {
+                // New bot message (start of new response)
+                return [
+                  ...prev,
+                  { bot: true, text: data.text, is_final: data.is_final }
+                ];
+              }
+            });
             if (!isPlayingAudio.current) {
               playNextAudio();
+            }
+            // If this is the final part of the response, reactivate STT
+            if (data.is_final) {
+              setTimeout(activateSTT, 500); // slight delay to avoid overlap
             }
           } else if (data.message) {
             setMessages((prev) => [...prev, { bot: true, text: data.message }]);
@@ -84,6 +130,7 @@ function App() {
         } else {
           if (data.session_id && data.session_id !== sessionId) {
             setSessionId(data.session_id);
+            localStorage.setItem('session_id', data.session_id);
           }
           if (data.full_message) {
             setMessages((prev) => {
@@ -118,6 +165,16 @@ function App() {
     }
   };
 
+  // Always use the same sessionId for both text and voice
+  useEffect(() => {
+    let storedSessionId = localStorage.getItem('session_id');
+    if (!storedSessionId) {
+      storedSessionId = generateSessionId();
+      localStorage.setItem('session_id', storedSessionId);
+    }
+    setSessionId(storedSessionId);
+  }, [voiceMode]);
+
   const handleVoiceToggle = () => {
     setVoiceMode(v => !v);
     if (ws.current) {
@@ -139,13 +196,16 @@ function App() {
     }
   };
 
+  // Remove * from TTS text before sending to backend
   const handleSend = (e) => {
     e.preventDefault();
     const input = e.target.elements.msg;
     if (input.value && ws.current && ws.current.readyState === 1 && !sending) {
       setSending(true);
+      let cleanText = input.value;
       if (voiceMode) {
-        ws.current.send(JSON.stringify({ text: input.value }));
+        cleanText = cleanText.replace(/\*/g, ''); // Remove all * for TTS
+        ws.current.send(JSON.stringify({ text: cleanText, session_id: sessionId }));
         setMessages((prev) => [...prev, { self: true, text: input.value }]);
       } else {
         ws.current.send(JSON.stringify({ message: input.value, session_id: sessionId }));
@@ -211,6 +271,83 @@ function App() {
     return <span dangerouslySetInnerHTML={{ __html: formatted }} />;
   }
 
+  // --- Enhanced STT logic for smooth, real-time experience ---
+  useEffect(() => {
+    if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+      return;
+    }
+    if (!sttActive) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+      setLiveTranscript("");
+      setIsProcessing(false);
+      return;
+    }
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognitionRef.current = recognition;
+
+    let silenceTimer = null;
+    recognition.onresult = (event) => {
+      let transcript = '';
+      let isFinal = false;
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        transcript += event.results[i][0].transcript;
+        if (event.results[i].isFinal) isFinal = true;
+      }
+      setLiveTranscript(transcript);
+      if (inputRef.current) inputRef.current.value = transcript;
+      if (isFinal) {
+        setIsProcessing(true);
+        if (silenceTimer) clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+          if (inputRef.current && inputRef.current.value.trim()) {
+            const fakeEvent = { preventDefault: () => {}, target: { elements: { msg: inputRef.current } } };
+            handleSend(fakeEvent);
+            inputRef.current.value = '';
+            setLiveTranscript("");
+          }
+          setIsProcessing(false);
+          setSttActive(false);
+        }, 800); // faster response after final
+      } else {
+        if (silenceTimer) {
+          clearTimeout(silenceTimer);
+          silenceTimer = null;
+        }
+      }
+    };
+    recognition.onerror = (e) => {
+      setIsProcessing(false);
+      setSttActive(false);
+    };
+    recognition.onend = () => {
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        if (inputRef.current && inputRef.current.value.trim()) {
+          const fakeEvent = { preventDefault: () => {}, target: { elements: { msg: inputRef.current } } };
+          handleSend(fakeEvent);
+          inputRef.current.value = '';
+          setLiveTranscript("");
+        }
+      }
+      setIsProcessing(false);
+      setSttActive(false);
+    };
+    recognition.start();
+    setIsProcessing(false);
+    return () => {
+      recognition.stop();
+      if (silenceTimer) clearTimeout(silenceTimer);
+    };
+    // eslint-disable-next-line
+  }, [sttActive]);
+
   return (
     <>
       {/* Main page content */}
@@ -219,7 +356,7 @@ function App() {
         <p style={{ maxWidth: 500, margin: '0 auto', color: '#bbb' }}>
           This is a simple demo page for a floating chat widget. Click the chat icon at the bottom right to start a conversation with the bot. The chat window supports real-time streaming responses.
         </p>
-        <button onClick={handleVoiceToggle} style={{ position: 'fixed', bottom: 90, right: 30, zIndex: 1000 }}>
+        <button onClick={handleVoiceToggle} style={{ position: 'fixed', bottom: 90, right: 90, zIndex: 1000 }}>
           {voiceMode ? 'Switch to Text Chat' : 'Switch to Voice Chat'}
         </button>
       </div>
@@ -233,7 +370,7 @@ function App() {
       {open && (
         <div className="chat-window dark-theme large">
           <div className="chat-header">
-            <span>Chat Bot Demo</span>
+            <span>🤵 Mr. Developer</span>
             <button className="close-btn" onClick={handleClose}>×</button>
           </div>
           {/* Session ID input for fetching history */}
@@ -249,26 +386,74 @@ function App() {
               <button type="submit">Get</button>
             </form>
           )}
-          <div className="chat-messages">
-            {messages.map((msg, i) => (
-              msg.self ? (
-                <div key={i} className="chat-message self">
-                  <span className="chat-avatar user">👤</span>
-                  <span className="chat-text">{msg.text}</span>
-                </div>
-              ) : (
-                <div key={i} className="chat-message bot">
-                  <span className="chat-avatar bot">🤖</span>
-                  <span className="chat-text">{voiceMode ? msg.text : formatBotMessage(msg.text)}</span>
-                </div>
-              )
-            ))}
-            {sending && <div className="chat-message bot loader"><span className="chat-avatar bot">🤖</span>Typing...</div>}
-          </div>
-          <form className="chat-input" onSubmit={handleSend}>
-            <input name="msg" autoComplete="off" placeholder="Type a message..." />
-            <button type="submit" disabled={sending}>Send</button>
-          </form>
+          {/* If in voiceMode and sttActive or isProcessing, show sphere card inside chat window */}
+          {voiceMode && (sttActive || isProcessing) ? (
+            <div className="voice-chat-card voice-chat-card-inside">
+              <div className="voice-chat-bubble-icon">
+                <span role="img" aria-label="chat">💬</span>
+              </div>
+              <div className="voice-chat-sphere" />
+              <div className="voice-chat-instruction">Click microphone to start listening</div>
+              <div className="voice-chat-buttons">
+                <button
+                  className="voice-mic-btn"
+                  onClick={() => { if (!sttActive && !isProcessing) setSttActive(true); }}
+                  disabled={isProcessing || sttActive}
+                  title={sttActive ? 'Listening...' : 'Tap to Speak'}
+                >
+                  <span role="img" aria-label="mic">🎤</span>
+                </button>
+                <button
+                  className="voice-cancel-btn"
+                  onClick={() => { setSttActive(false); setIsProcessing(false); }}
+                  title="Cancel"
+                >
+                  <span role="img" aria-label="cancel">❌</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="chat-messages">
+                {messages.map((msg, i) => (
+                  msg.self ? (
+                    <div key={i} className="chat-message self">
+                      <span className="chat-avatar user">👤</span>
+                      <span className="chat-text">{msg.text}</span>
+                    </div>
+                  ) : (
+                    <div key={i} className="chat-message bot">
+                      <span className="chat-avatar bot">🤖</span>
+                      <span className="chat-text">{voiceMode ? msg.text : formatBotMessage(msg.text)}</span>
+                    </div>
+                  )
+                ))}
+                {sending && <div className="chat-message bot loader"><span className="chat-avatar bot">🤖</span>Typing...</div>}
+              </div>
+              <form className="chat-input" onSubmit={handleSend}>
+                <textarea
+                  name="msg"
+                  autoComplete="off"
+                  placeholder="Type a message..."
+                  ref={inputRef}
+                  rows={2}
+                  style={{ resize: 'vertical', minHeight: 36, maxHeight: 120, flex: 1 }}
+                />
+                {voiceMode && (
+                  <button
+                    type="button"
+                    onClick={() => setSttActive(true)}
+                    style={{ marginLeft: 8, marginRight: 8, background: sttActive ? '#0f0' : '#333', color: '#000', border: 'none', borderRadius: 4, padding: '0 12px', height: 36 }}
+                    title={sttActive ? 'Listening...' : 'Start Listening'}
+                    disabled={sttActive}
+                  >
+                    {sttActive ? '🎤 Listening...' : '🎤 Start Mic'}
+                  </button>
+                )}
+                <button type="submit" disabled={sending}>Send</button>
+              </form>
+            </>
+          )}
         </div>
       )}
     </>
