@@ -7,10 +7,13 @@ def chat_history(request, session_id):
         session = ChatSession.objects.get(session_id=session_id)
         messages = Message.objects.filter(session=session).order_by('timestamp')
         print(f"Retrieved {len(messages)} messages for session {session_id}")
-        return JsonResponse({
-            'messages': [
+        messages_data = [
                 {'role': m.role, 'content': m.content, 'timestamp': m.timestamp.isoformat()} for m in messages
             ]
+        
+        print(f"Messages data: {messages_data}")
+        return JsonResponse({
+            'messages': messages_data
         })
     except ChatSession.DoesNotExist:
         return JsonResponse({'messages': []})

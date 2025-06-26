@@ -13,7 +13,7 @@ import pickle
 LLAMA3_API_URL = os.getenv('LLAMA3_API_URL', 'http://localhost:11434/api/chat')  # Adjust as needed
 
 class TTSService:
-    def __init__(self, voice="en-US-JennyNeural"):
+    def __init__(self, voice="en-AU-WilliamNeural"):
         self.voice = voice
 
     def split_into_sentences(self, text):
@@ -73,7 +73,7 @@ class ChatConsumer(ProjectInfoExtractorMixin, AsyncWebsocketConsumer):
     async def connect(self):
         await self.accept()
         time.sleep(1)
-        welcome_message = "Hello, I\'m Napptune, your friendly assistant at Apptunix. I\'m excited to learn more about your project idea and see if we can help bring it to life. To get started, can you tell me a bit about what\'s on your mind?"
+        welcome_message = "Hello, I\'m Mr. Developer, your friendly assistant at Apptunix. I\'m excited to learn more about your project idea and see if we can help bring it to life. To get started, can you tell me a bit about what\'s on your mind?"
         await self.send(text_data=json.dumps({
                 'message': welcome_message
             }))
@@ -149,35 +149,40 @@ class ChatConsumer(ProjectInfoExtractorMixin, AsyncWebsocketConsumer):
             import uuid
             session_id = str(uuid.uuid4())
         session, memory = await self.get_or_create_session(session_id)
-        memory.chat_memory.add_user_message(user_message)
-        await self.save_message(session, 'user', user_message)
         # Use LangChain memory for context
         history = memory.load_memory_variables({})['history']
         context_msgs = self.langchain_history_to_openai(history)
         # Updated system prompt for Expo AI Assistant
         system_prompt = (
-            "You are Mr. Developer, an AI assistant for the Apptunix (IT consultancy) website, currently showcased at an Expo. "
+            "You are Mr. Developer, an AI assistant for the Apptunix (IT consultancy) website, currently showcased at an Expo. Booth"
             "Begin each conversation with a warm, friendly greeting and a brief introduction about yourself and Apptunix. "
             "Do not start by asking questions immediately. Wait for the user to share their thoughts or project idea first. "
-            "Once the user responds, act as a business person and technical analyst: interact with potential leads, gather all necessary details about their project ideas, and provide a clear outline for project kickoff. Questions should be asked step by step."
+            "Once the user responds, act as a business person and technical analyst: interact with potential leads, gather all necessary details about their project ideas, and provide a clear outline for project kickoff. Questions should be asked step by step, and only one question should be asked at a time. Keep your responses concise and focused."
             "Ask questions to understand the client's vision, business goals, and technical requirements only after the initial greeting and user response. "
             "After gathering enough information, provide an outline of required resources (number of developers, 3rd party services, cloud services, etc.), time and cost estimations, and a summary of the next steps. "
             "Be friendly, professional, and proactive in helping the client shape their project."
         )
         # Only send system prompt if this is the first message
+        print("------------------------------------------------>", context_msgs)
         if not context_msgs:
+            print("================================> No context messages found, sending system prompt")
             messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
         else:
-            messages = context_msgs + [{"role": "user", "content": user_message}]
+            messages =  context_msgs + [{"role": "user", "content": user_message + " Keep Your response Short and Crisp. (not more than 50 words)"}]
         payload = {
             "model": "llama3",
             "stream": True,
-            "messages": messages
+            "messages": messages,
+            "max_tokens": 200,  # Limit the number of tokens in the response
+            "temperature": 0.7,  # Optional: make responses more focused
         }
         headers = {
             'Content-Type': 'application/json'
         }
         try:
+            # Now add user message to memory and DB (after context check)
+            memory.chat_memory.add_user_message(user_message)
+            await self.save_message(session, 'user', user_message)
             # Stream LLM response as soon as each part arrives
             full_message = ""
             async with httpx.AsyncClient(timeout=None) as client:
@@ -300,7 +305,7 @@ class VoiceChatConsumer(ProjectInfoExtractorMixin, AsyncWebsocketConsumer):
     async def receive(self, text_data):
         data = json.loads(text_data)
         user_text = data.get("text", "")
-        voice = data.get("voice", "en-US-JennyNeural")
+        voice = "en-US-GuyNeural"
         session_id = data.get("session_id")
         if not session_id:
             import uuid
@@ -314,10 +319,10 @@ class VoiceChatConsumer(ProjectInfoExtractorMixin, AsyncWebsocketConsumer):
         context_msgs = self.langchain_history_to_openai(history)
         # Compose system prompt
         system_prompt = (
-            "You are Mr. Developer, an AI assistant for the Apptunix (IT consultancy) website, currently showcased at an Expo. "
+            "You are Mr. Developer, an AI assistant for the Apptunix website, currently showcased at an Expo. Booth"
             "Begin each conversation with a warm, friendly greeting and a brief introduction about yourself and Apptunix. "
             "Do not start by asking questions immediately. Wait for the user to share their thoughts or project idea first. "
-            "Once the user responds, act as a business person and technical analyst: interact with potential leads, gather all necessary details about their project ideas, and provide a clear outline for project kickoff. Questions should be asked step by step."
+            "Once the user responds, act as a business person and technical analyst: interact with potential leads, gather all necessary details about their project ideas, and provide a clear outline for project kickoff. Questions should be asked step by step, and only one question should be asked at a time. Keep your responses concise and focused."
             "Ask questions to understand the client's vision, business goals, and technical requirements only after the initial greeting and user response. "
             "After gathering enough information, provide an outline of required resources (number of developers, 3rd party services, cloud services, etc.), time and cost estimations, and a summary of the next steps. "
             "Be friendly, professional, and proactive in helping the client shape their project."
@@ -327,11 +332,13 @@ class VoiceChatConsumer(ProjectInfoExtractorMixin, AsyncWebsocketConsumer):
         if not context_msgs:
             messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}]
         else:
-            messages = context_msgs + [{"role": "user", "content": user_text}]
+            messages = context_msgs + [{"role": "user", "content": user_text + " Keep Your response Short and Crisp. (NOTE: Response shouldn't be more than 65 words)"}]
         payload = {
             "model": "llama3",
             "stream": True,
-            "messages": messages
+            "messages": messages,
+            "max_tokens": 100,  # Limit the number of tokens in the response
+            "temperature": 0.7,  # Optional: make responses more focused
         }
         headers = {
             'Content-Type': 'application/json'
@@ -362,7 +369,10 @@ class VoiceChatConsumer(ProjectInfoExtractorMixin, AsyncWebsocketConsumer):
                                             incomplete = ""
                                         for i, sentence in enumerate(sentences):
                                             if sentence:
-                                                audio_base64 = await tts_service.text_to_speech_chunk(sentence)
+                                                sentence_clean = sentence.replace("*", "")
+                                                audio_base64 = await tts_service.text_to_speech_chunk(sentence_clean)
+                                                print(f"[TTS DEBUG] Sentence: {sentence}")
+                                                print(f"[TTS DEBUG] Audio base64 length: {len(audio_base64) if audio_base64 else 0}")
                                                 await self.send(text_data=json.dumps({
                                                     "text": sentence,
                                                     "audio_data": audio_base64,
@@ -373,14 +383,18 @@ class VoiceChatConsumer(ProjectInfoExtractorMixin, AsyncWebsocketConsumer):
                                                 }))
                                                 chunk_index += 1
                                         buffer = incomplete
-                            except Exception:
+                            except Exception as e:
+                                print(f"[TTS ERROR] {e}")
                                 continue
             # After streaming ends, flush any remaining buffer as final sentence
             if buffer.strip():
                 sentences = tts_service.split_into_sentences(buffer)
                 for i, sentence in enumerate(sentences):
                     if sentence:
-                        audio_base64 = await tts_service.text_to_speech_chunk(sentence)
+                        sentence_clean = sentence.replace("*", "")
+                        audio_base64 = await tts_service.text_to_speech_chunk(sentence_clean)
+                        print(f"[TTS DEBUG] FINAL Sentence: {sentence}")
+                        print(f"[TTS DEBUG] FINAL Audio base64 length: {len(audio_base64) if audio_base64 else 0}")
                         await self.send(text_data=json.dumps({
                             "text": sentence,
                             "audio_data": audio_base64,
